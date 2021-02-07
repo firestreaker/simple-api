@@ -1,6 +1,8 @@
 # A simple API
 This API is built using Azure Function Apps. Each Function within the Function App can be used as a HTTP endpoint for your API. Authentication is performed via Azure Active Directory (AAD), which supports authorization using Azure role-based access control (RBAC). Application Insights is used to store and visualize metrics and logs of the Function App. For production logging, the "Information" level has been set in *./functions/host.json* however this file is ininitalized after the Functions are created. A Web Application Firewall is used with Azure Front Door to provide DDoS protection for the Function App. 
 
+In an environment with a proper CI/CD pipeline (ie, not a free account on github) this ARM template and associated functions would be deployed to Azure via a pipeline with build, and other stages (eg dev, staging, production).
+
 A sample set of functions are included in this repo in the *./functions* folder to demonstrate the CRUD capabilities of the Function App.
 
 ## Deployment instructions
