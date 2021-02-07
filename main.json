@@ -1,0 +1,354 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "AppName": {
+            "type": "String"
+        },
+        "env": {
+            "type": "String"
+        },
+        "resourceTags": { 
+            "type": "object"
+        },
+        "aadClientId": { //App registration ID in AAD
+            "type": "String"
+        }
+    },
+    "variables": {
+        "AppNameCleaned": "[toLower(replace(concat(parameters('AppName'), parameters('env')), '-', ''))]", //formatted for certain resources
+        "StorageAccount": "[variables('AppNameCleaned')]",
+        "HostingPlan": "[concat(parameters('AppName'),'-',parameters('env'))]",
+        "skuName": "S1",
+        "skuCapacity": 2,
+        "AppInsights": "[concat(parameters('AppName'),'-',parameters('env'))]",
+        "FrontDoor": "[concat(parameters('AppName'),'-',parameters('env'))]",
+        "FunctionApp": "[concat(parameters('AppName'),'-',parameters('env'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Storage/storageAccounts", //storage account
+            "apiVersion": "2019-06-01",
+            "name": "[variables('StorageAccount')]",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Standard_LRS",
+                "tier": "Standard"
+            },
+            "kind": "StorageV2"
+        },
+        {
+            "apiVersion": "2015-08-01",
+            "name": "[variables('HostingPlan')]",
+            "type": "Microsoft.Web/serverfarms", //app service plan
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "[variables('skuName')]",
+                "capacity": "[variables('skuCapacity')]"
+            },
+            "properties": {
+                "name": "[variables('HostingPlan')]"
+            },
+            "tags": "[parameters('resourceTags')]"
+        },
+        {
+            "name": "[concat(variables('HostingPlan'), '-Autoscale')]",
+            "type": "Microsoft.Insights/autoscaleSettings", //autoscale rules for ASP based on CPU usage threshold
+            "location": "[resourceGroup().location]",
+            "apiVersion": "2015-04-01",
+            "tags": "[parameters('resourceTags')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', variables('HostingPlan'))]"
+            ],
+            "properties": {
+                "name": "[concat(variables('HostingPlan'), '-Autoscale')]",
+                "enabled": true,
+                "targetResourceUri": "[resourceId('Microsoft.Web/serverfarms', variables('HostingPlan'))]",
+                "profiles": [
+                {
+                    "name": "Auto created scale condition",
+                    "capacity": {
+                        "minimum": "1",
+                        "maximum": "4",
+                        "default": "1"
+                    },
+                    "rules": [
+                        {
+                            "scaleAction": {
+                                "direction": "Increase",
+                                "type": "ChangeCount",
+                                "value": "1",
+                                "cooldown": "PT5M"
+                            },
+                            "metricTrigger": {
+                                "metricName": "CpuPercentage",
+                                "metricNamespace": "microsoft.web/serverfarms",
+                                "metricResourceUri": "[resourceId('Microsoft.Web/serverfarms', variables('HostingPlan'))]",
+                                "operator": "GreaterThan",
+                                "statistic": "Average",
+                                "threshold": 80,
+                                "timeAggregation": "Maximum",
+                                "timeGrain": "PT1M",
+                                "timeWindow": "PT5M",
+                                "Dimensions": [],
+                                "dividePerInstance": false
+                            }
+                        },
+                        {
+                            "scaleAction": {
+                                "direction": "Decrease",
+                                "type": "ChangeCount",
+                                "value": "1",
+                                "cooldown": "PT5M"
+                            },
+                            "metricTrigger": {
+                                "metricName": "CpuPercentage",
+                                "metricNamespace": "microsoft.web/serverfarms",
+                                "metricResourceUri": "[resourceId('Microsoft.Web/serverfarms', variables('HostingPlan'))]",
+                                "operator": "LessThan",
+                                "statistic": "Average",
+                                "threshold": 30,
+                                "timeAggregation": "Maximum",
+                                "timeGrain": "PT1M",
+                                "timeWindow": "PT10M",
+                                "Dimensions": [],
+                                "dividePerInstance": false
+                            }
+                        }
+                    ]
+                }
+            ],
+                "notifications": [],
+                "targetResourceLocation": "[resourceGroup().location]"
+            }
+        },
+        {
+            "type": "Microsoft.Insights/components", //App Insights for logging and metrics storage and visualization
+            "apiVersion": "2015-05-01",
+            "name": "[variables('AppInsights')]",
+            "location": "[resourceGroup().location]",
+            "kind": "web",
+            "properties": {
+                "Application_Type": "web"
+            },
+            "tags": "[parameters('resourceTags')]"
+        },
+        {
+            "type":"Microsoft.Insights/scheduledQueryRules", //Custom metric to detect any errors in logs
+            "name":"[concat(variables('FunctionApp'), ' Error')]",
+            "apiVersion": "2018-04-16",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Insights/components', variables('AppInsights'))]"
+            ],
+            "properties":{
+                "description": "Error detected on function app",
+                "enabled": "true",
+                "source": {
+                    "query": "[concat('requests | project timestamp, id, operation_Name, success, resultCode, duration, cloud_RoleName | where success =~ ''False'' | where cloud_RoleName =~ ''', variables('FunctionApp'), ''' | order by timestamp desc')]",
+                    "dataSourceId": "[resourceId('Microsoft.Insights/components', variables('AppInsights'))]",
+                    "queryType":"ResultCount"
+                },
+                "schedule":{
+                    "frequencyInMinutes": 30,
+                    "timeWindowInMinutes": 360
+                },
+                "action":{
+                    "odata.type": "Microsoft.WindowsAzure.Management.Monitoring.Alerts.Models.Microsoft.AppInsights.Nexus.DataContracts.Resources.ScheduledQueryRules.AlertingAction",
+                    "severity": "3",
+                    "trigger":{
+                        "thresholdOperator": "GreaterThan",
+                        "threshold": 0
+                    }
+                }
+            }
+        },
+        {
+            "apiVersion": "2019-03-01",
+            "type": "Microsoft.Network/FrontDoorWebApplicationFirewallPolicies", //Web Application Firewall for DDoS protection
+            "name": "[variables('AppNameCleaned')]",
+            "location": "[resourceGroup().location]",            
+            "properties": {
+                "policySettings": {
+                    "mode": "Detection",
+                    "enabledState": "Enabled"
+                },
+                "managedRules": {
+                    "managedRuleSets": [
+                        {
+                            "ruleSetType": "DefaultRuleSet",
+                            "ruleSetVersion": "1.0"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "apiVersion": "2020-05-01",
+            "type": "Microsoft.Network/frontDoors", //Azure front door to link the Firewall to Function App
+            "name": "[variables('FrontDoor')]",
+            "location": "global",
+            "tags": {},
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/FrontDoorWebApplicationFirewallPolicies', variables('AppNameCleaned'))]",
+                "[resourceId('Microsoft.Web/sites', variables('FunctionApp'))]"
+            ],
+            "properties": {
+                "routingRules": [
+                    {
+                        "name": "routingRule1",
+                        "properties": {
+                            "frontendEndpoints": [
+                                {
+                                    "id": "[concat(resourceId('Microsoft.Network/frontDoors', variables('FrontDoor')),'/frontendEndpoints/frontendEndpoint1')]"
+                                }
+                            ],
+                            "acceptedProtocols": [
+                                "Http",
+                                "Https"
+                            ],
+                            "patternsToMatch": [
+                                "/*"
+                            ],
+                            "enabledState": "Enabled",
+                            "routeConfiguration": {
+                                "@odata.type": "#Microsoft.Azure.FrontDoor.Models.FrontdoorForwardingConfiguration",
+                                "customForwardingPath": null,
+                                "forwardingProtocol": "MatchRequest",
+                                "backendPool": {
+                                    "id": "[concat(resourceId('Microsoft.Network/frontDoors', variables('FrontDoor')),'/backendPools/backendPool1')]"
+                                },
+                                "cacheConfiguration": null
+                            }
+                        }
+                    }
+                ],
+                "healthProbeSettings": [
+                    {
+                        "name": "healthProbeSettings1",
+                        "properties": {
+                            "path": "/",
+                            "protocol": "Https",
+                            "intervalInSeconds": 120,
+                            "healthProbeMethod": "Head",
+                            "enabledState": "Enabled"
+                        }
+                    }
+                ],
+                "loadBalancingSettings": [
+                    {
+                        "name": "loadBalancingSettings1",
+                        "properties": {
+                            "sampleSize": 2,
+                            "successfulSamplesRequired": 1,
+                            "additionalLatencyMilliseconds": 0
+                        }
+                    }
+                ],
+                "backendPools": [
+                    {
+                        "name": "backendPool1",
+                        "properties": {
+                            "backends": [
+                                {
+                                    "address": "[concat(variables('FunctionApp'), '.azurewebsites.net')]",
+                                    "httpPort": 80,
+                                    "httpsPort": 443,
+                                    "weight": 50,
+                                    "priority": 1,
+                                    "enabledState": "Enabled"
+                                }
+                            ],
+                            "loadBalancingSettings": {
+                                "id": "[concat(resourceId('Microsoft.Network/frontDoors', variables('FrontDoor')),'/loadBalancingSettings/loadBalancingSettings1')]"
+                            },
+                            "healthProbeSettings": {
+                                "id": "[concat(resourceId('Microsoft.Network/frontDoors', variables('FrontDoor')),'/healthProbeSettings/healthProbeSettings1')]"
+                            }
+                        }
+                    }
+                ],
+                "frontendEndpoints": [
+                    {
+                        "name": "frontendEndpoint1",
+                        "properties": {
+                            "hostName": "[concat(variables('FrontDoor'), '.azurefd.net')]",
+                            "sessionAffinityEnabledState": "Enabled",
+                            "sessionAffinityTtlSeconds": 0,
+                            "webApplicationFirewallPolicyLink": {
+                                "id": "[resourceId('Microsoft.Network/FrontDoorWebApplicationFirewallPolicies', variables('AppNameCleaned'))]"
+                            }
+                        }
+                    }
+                ],
+                "enabledState": "Enabled"
+            }
+        },
+        {
+            "type": "Microsoft.Web/sites", //Function App/API
+            "apiVersion": "2018-11-01",
+            "name": "[variables('FunctionApp')]",
+            "location": "[resourceGroup().location]",
+            "kind": "functionapp",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('StorageAccount'))]",
+                "[resourceId('Microsoft.Web/serverfarms', variables('HostingPlan'))]",
+                "[resourceId('Microsoft.Insights/components', variables('AppInsights'))]"
+            ],
+            "resources": [
+                {
+                    "name": "[concat(variables('FunctionApp'), '/authsettings')]", //Authorization provider
+                    "apiVersion": "2016-08-01",
+                    "type": "Microsoft.Web/sites/config",
+                    "location": "[resourceGroup().location]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', variables('FunctionApp'))]"
+                    ],
+                    "properties": {
+                        "enabled": true,
+                        "unauthenticatedClientAction": "RedirectToLoginPage",
+                        "tokenStoreEnabled": true,
+                        "defaultProvider": "AzureActiveDirectory",
+                        "clientId": "[parameters('aadClientId')]",
+                        "issuer": "[concat('https://sts.windows.net/', subscription().tenantId, '/')]"
+                    }
+                }
+            ],
+            "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms/', variables('HostingPlan'))]",
+                "siteConfig": {
+                    "appSettings": [
+                        {
+                            "name": "AzureWebJobsStorage",
+                            "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', variables('StorageAccount'), ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('StorageAccount')),'2019-06-01').keys[0].value)]"
+                        },
+                        {
+                            "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+                            "value": "[reference(resourceId('microsoft.insights/components/', variables('AppInsights')), '2015-05-01').InstrumentationKey]"
+                        },
+                        {
+                            "name": "FUNCTIONS_WORKER_RUNTIME",
+                            "value": "powershell"
+                        },
+                        {
+                            "name": "FUNCTIONS_EXTENSION_VERSION",
+                            "value": "~3"
+                        },
+                        {
+                            "name": "SourceType",
+                            "value": "functionapp"
+                        }
+                    ],
+                    "alwaysOn": true
+                }
+            },
+            "tags": "[parameters('resourceTags')]"
+        }
+    ],
+    "outputs": {
+        //List outputs to be used in the main template or in post deployment within the pipeline or PShell script.
+    }
+}

@@ -1,0 +1,19 @@
+{
+    "bindings": [
+        {
+            "name": "Request",
+            "authLevel": "anonymous",
+            "methods": [
+                "delete"
+            ],
+            "direction": "in",
+            "type": "httpTrigger",
+            "route": "item"
+        },
+        {
+            "type": "http",
+            "direction": "out",
+            "name": "Response"
+        }
+    ]
+}
